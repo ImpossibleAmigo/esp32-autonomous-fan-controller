@@ -26,9 +26,16 @@ constexpr uint8_t RELAY_OFF = LOW;
 
 volatile bool isFanRunning = false;
 
-// Дескриптори системних таймерів ESP-IDF
 esp_timer_handle_t cycleTimer   = nullptr;
 esp_timer_handle_t shutoffTimer = nullptr;
+
+/**
+ * @brief Допоміжна функція логування з міткою часу (в секундах від старту)
+ */
+void logState(const char* tag, const char* message) {
+    double uptimeSec = esp_timer_get_time() / 1000000.0;
+    Serial.printf("[%8.2f s] [%s] %s\n", uptimeSec, tag, message);
+}
 
 void applyHardwareState(bool fanActive) {
     digitalWrite(PIN_FAN_RELAY,  fanActive ? RELAY_ON : RELAY_OFF);
@@ -36,22 +43,28 @@ void applyHardwareState(bool fanActive) {
     digitalWrite(PIN_LED_IDLE,   fanActive ? LOW  : HIGH);
 }
 
-/**
- * @brief Callback одноразового таймера: вимикає вентилятор після відпрацювання часу
- */
-void IRAM_ATTR onShutoffTimerCallback(void* arg) {
+void onShutoffTimerCallback(void* arg) {
+    if (!isFanRunning) {
+        logState("WARN", "Спроба вимкнути вентилятор, який вже вимкнений.");
+        return;
+    }
+
     isFanRunning = false;
     applyHardwareState(false);
+    logState("FAN_OFF", "Вентилятор ВИМКНЕНО. Перехід у режим очікування (LED: IDLE).");
 }
 
-/**
- * @brief Callback періодичного таймера: запускає вентилятор і планує його вимкнення
- */
-void IRAM_ATTR onCycleTimerCallback(void* arg) {
+void onCycleTimerCallback(void* arg) {
+    // Захист від повторного запуску (перевірка стану та активності one-shot таймера)
+    if (isFanRunning || esp_timer_is_active(shutoffTimer)) {
+        logState("GUARD", "Захист спрацював: вентилятор вже працює! Повторний запуск заблоковано.");
+        return;
+    }
+
     isFanRunning = true;
     applyHardwareState(true);
+    logState("FAN_ON", "Вентилятор УВІМКНЕНО (LED: ACTIVE). Запущено відлік до вимкнення.");
 
-    // Запускаємо одноразовий таймер на час роботи вентилятора
     esp_timer_start_once(shutoffTimer, FAN_RUN_TIME_US);
 }
 
@@ -74,13 +87,21 @@ void initTimers() {
     };
     ESP_ERROR_CHECK(esp_timer_create(&cycleTimerArgs, &cycleTimer));
 
-    // Перший запуск одразу при старті, далі — строго за періодом CYCLE_PERIOD_US
     onCycleTimerCallback(nullptr);
     ESP_ERROR_CHECK(esp_timer_start_periodic(cycleTimer, CYCLE_PERIOD_US));
 }
 
 void setup() {
     Serial.begin(115200);
+    // Коротка пауза тільки в setup для ініціалізації USB CDC на ESP32-S3
+    uint32_t startWait = millis();
+    while (!Serial && (millis() - startWait < 2000)) {}
+
+    Serial.println("\n=======================================================");
+    Serial.println("  ESP32-S3 Autonomous Exhaust Fan Controller Initialized");
+    Serial.printf("  Період циклу: %llu с | Тривалість роботи: %llu с\n",
+                  CYCLE_PERIOD_US / 1000000ULL, FAN_RUN_TIME_US / 1000000ULL);
+    Serial.println("=======================================================");
 
     pinMode(PIN_FAN_RELAY,  OUTPUT);
     pinMode(PIN_LED_ACTIVE, OUTPUT);
@@ -91,5 +112,5 @@ void setup() {
 }
 
 void loop() {
-    // Керування вентилятором повністю автономне і не використовує loop()
+    // Основний потік вільний від логіки таймерів
 }
